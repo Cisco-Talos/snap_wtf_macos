@@ -1,0 +1,243 @@
+diff --git a/volatility/plugins/addrspaces/vmware.py b/volatility/plugins/addrspaces/vmware.py
+index be0411d0..4d32fe10 100644
+--- a/volatility/plugins/addrspaces/vmware.py
++++ b/volatility/plugins/addrspaces/vmware.py
+@@ -174,7 +174,6 @@ class VMWareAddressSpace(addrspace.AbstractRunBasedMemory):
+ 
+         ## A VMware header is found at offset zero of the file 
+         self.header = obj.Object("_VMWARE_HEADER", offset = 0, vm = base)
+-
+         self.as_assert(self.header.Magic in [0xbed2bed0, 0xbad1bad1, 0xbed2bed2, 0xbed3bed3],
+                        "Invalid VMware signature: {0:#x}".format(self.header.Magic))
+ 
+@@ -182,43 +181,44 @@ class VMWareAddressSpace(addrspace.AbstractRunBasedMemory):
+         region_count = self.get_tag(self.header, grp_name = "memory",
+                                      tag_name = "regionsCount", 
+                                      data_type = "unsigned int")
+-
+         if not region_count.is_valid() or region_count == 0:
+             ## Create a single run from the main memory region 
+             memory_tag = self.get_tag(self.header, grp_name = "memory", 
+                                       tag_name = "Memory")
+-
+-            self.as_assert(memory_tag != None,
+-                           "Cannot find the single-region Memory tag")
+-
+-            self.runs.append((0, memory_tag.RealDataOffset, memory_tag.DataDiskSize))
++            memory_offset = self.get_tag(self.header, grp_name = "memory", 
++                            tag_name = "regionPPN",
++                            indices = [i],
++                            data_type = "unsigned int") * self.PAGE_SIZE            
++            #self.as_assert(memory_tag != None,
++            #               "Cannot find the single-region Memory tag")
++
++            self.runs.append((0, 0, 0))
+         else:
+             ## Create multiple runs - one for each region in the header
+-            for i in range(region_count):
+-                memory_tag = self.get_tag(self.header, grp_name = "memory",
+-                                tag_name = "Memory",
+-                                indices = [0, 0])
+-
+-                self.as_assert(memory_tag != None,
+-                           "Cannot find the Memory tag")
+-
+-                memory_offset = self.get_tag(self.header, grp_name = "memory", 
+-                                tag_name = "regionPPN",
+-                                indices = [i],
+-                                data_type = "unsigned int") * self.PAGE_SIZE
+-
+-                file_offset = self.get_tag(self.header, grp_name = "memory",
+-                                tag_name = "regionPageNum", indices = [i],
+-                                data_type = "unsigned int") * \
+-                                self.PAGE_SIZE + memory_tag.RealDataOffset
+-
+-                length = self.get_tag(self.header, grp_name = "memory", 
+-                                tag_name = "regionSize",
+-                                indices = [i],
+-                                data_type = "unsigned int") * self.PAGE_SIZE
+-
+-                self.runs.append((memory_offset, file_offset, length))
+-
++            try:            
++                for i in range(region_count):
++                    memory_tag = self.get_tag(self.header, grp_name = "memory",
++                                    tag_name = "Memory",
++                                    indices = [0, 0])
++                    #self.as_assert(memory_tag != None,
++                    #           "Cannot find the Memory tag")
++                    memory_offset = self.get_tag(self.header, grp_name = "memory", 
++                                    tag_name = "regionPPN",
++                                    indices = [i],
++                                    data_type = "unsigned int") * self.PAGE_SIZE
++
++                    file_offset = self.get_tag(self.header, grp_name = "memory",
++                                    tag_name = "regionPageNum", indices = [i],
++                                    data_type = "unsigned int") * \
++                                    self.PAGE_SIZE + memory_tag.RealDataOffset
++
++                    length = self.get_tag(self.header, grp_name = "memory", 
++                                    tag_name = "regionSize",
++                                    indices = [i],
++                                    data_type = "unsigned int") * self.PAGE_SIZE
++                    self.runs.append((memory_offset, file_offset, length))
++            except Exception as e:
++                print(e)
+         ## Make sure we found at least one memory run
+         self.as_assert(len(self.runs) > 0,
+                        "Cannot find any memory run information")
+diff --git a/volatility/plugins/vmwareinfo.py b/volatility/plugins/vmwareinfo.py
+index 05aaa462..a5436f0c 100644
+--- a/volatility/plugins/vmwareinfo.py
++++ b/volatility/plugins/vmwareinfo.py
+@@ -24,7 +24,7 @@ import volatility.utils as utils
+ class VMwareInfo(crashinfo.CrashInfo):
+     """Dump VMware VMSS/VMSN information"""
+     
+-    target_as = ['VMWareAddressSpace', 'VMWareMetaAddressSpace']
++    target_as = ['VMWareAddressSpace']
+ 
+     def __init__(self, config, *args, **kwargs):
+         crashinfo.CrashInfo.__init__(self, config, *args, **kwargs)
+@@ -58,7 +58,10 @@ class VMwareInfo(crashinfo.CrashInfo):
+                                   ("DataSize", "#018x"), 
+                                   ("Name", "50"), 
+                                   ("Value", "")])
+-    
++        segments = []
++        segment = {}
++        from collections import OrderedDict
++        registers = OrderedDict()
+         for group in header.Groups:
+             for tag in group.Tags:
+             
+@@ -86,7 +89,49 @@ class VMwareInfo(crashinfo.CrashInfo):
+                                tag.DataMemSize, 
+                                "{0}/{1}{2}".format(group.Name, tag.Name, indices), 
+                                value)
+-                               
++                if(str(group.Name) == 'SVGA'):
++                    break
++                if(str(group.Name) == "cpu" and str(tag.Name).startswith('S')):
++                    tn = str(tag.Name)
++                    if(len(tn) == 1 or tn[1] == '.'): #segment
++                        seg_idx = tag.TagIndices[1]
++                        if tn == "S":
++                            segment["sel"] = value
++                        elif tn == "S.limit":
++                            segment["lim"] = value
++                        elif tn == "S.base":
++                            segment["base"] = value
++                        elif tn == "S.base64":
++                            segment["base64"] = value
++                        elif tn == "S.rights":
++                            segment["rights"] = "0x%x"%(int(value,16)>>8)
++                            print(segment)
++                            segments.append(segment.copy())
++                if str(group.Name) == "cpu":
++                    if str(tag.Name) == "tscOffset":
++                        registers['tsc'] = value
++                    if str(tag.Name) == "tscAux":
++                        registers['tsc_aux'] = value                        
++                    if str(tag.Name) == "sysEnterCS":
++                        registers['sysenter_cs'] = value
++                    if str(tag.Name) == "sysEnterESP":
++                        registers['sysenter_esp'] = value
++                    if str(tag.Name) == "sysEnterEIP":
++                        registers['sysenter_eip'] = value
++                    if str(tag.Name) == "PAT":
++                        registers['pat'] = value
++                    if str(tag.Name) == "EFER":
++                        registers['efer'] = value                        
++                    if str(tag.Name) == "KERNELGSBASE":
++                        registers['kernel_gs_base'] = value                                                 
++                    if str(tag.Name) == "XCR0":
++                        registers['xcr0'] = value    
++                    if str(tag.Name) == "EFLAGS":
++                        registers['rflags'] = value     
++                    if str(tag.Name) == "rip":
++                        registers['rip'] = value 
++
++
+                 ## In verbose mode, when we're *not* dealing with memory segments, 
+                 ## print a hexdump of the data 
+                 if (self._config.VERBOSE and tag.DataMemSize > 0 
+@@ -102,6 +147,48 @@ class VMwareInfo(crashinfo.CrashInfo):
+                      
+                     ## If an output directory was supplied, extract the 
+                     ## snapshot thumbnail image using the code below. 
++
++                    #parse gp regs
++                    import struct
++                    if(str(group.Name) == "cpu" and str(tag.Name) == "gpregs"):
++                        rax,rcx,rdx,rbx,rsp,rbp,rsi,rdi,r8,r9,r10,r11,r12,r13,r14,r15 = struct.unpack("Q"*16, data)
++                        registers['rax'] = "0x%x"%(rax)
++                        registers['rbx'] = "0x%x"%(rbx)
++                        registers['rcx'] = "0x%x"%(rcx)
++                        registers['rdx'] = "0x%x"%(rdx)
++                        registers['rsi'] = "0x%x"%(rsi)
++                        registers['rdi'] = "0x%x"%(rdi)
++                        registers['rsp'] = "0x%x"%(rsp)
++                        registers['rbp'] = "0x%x"%(rbp)
++                        registers['r8'] ="0x%x"%( r8)
++                        registers['r9'] ="0x%x"%( r9)
++                        registers['r10'] = "0x%x"%(r10)
++                        registers['r11'] = "0x%x"%(r11)
++                        registers['r12'] = "0x%x"%(r12)
++                        registers['r13'] = "0x%x"%(r13)
++                        registers['r14'] = "0x%x"%(r14)
++                        registers['r15'] = "0x%x"%(r15)
++                    if(str(group.Name) == "cpu" and str(tag.Name) == "CR64"):
++                        cr0,cr1,cr2,cr3,cr4,cr5,cr6,cr7,cr8 = struct.unpack("Q"*9,data)
++                        registers['cr0'] = "0x%x"%(cr0)
++                        registers['cr2'] = "0x%x"%(cr2)
++                        registers['cr3'] = "0x%x"%(cr3)
++                        registers['cr4'] = "0x%x"%(cr4)
++                        registers['cr8'] = "0x%x"%(cr8)
++                    if(str(group.Name) == "cpu" and str(tag.Name) == "DR64"):
++                        dr0,dr1,dr2,dr3,dr4,dr5,dr6,dr7 = struct.unpack("Q"*8,data)
++                        registers['dr0'] = "0x%x"%(dr0)
++                        registers['dr1'] = "0x%x"%(dr1)
++                        registers['dr2'] = "0x%x"%(dr2)
++                        registers['dr3'] = "0x%x"%(dr3)
++                        registers['dr6'] = "0x%x"%(dr6)
++                        registers['dr7'] = "0x%x"%(dr7)
++                    if(str(group.Name) == "cpu" and str(tag.Name) == "GDTR"):                     
++                        gdtr_limit,gdtr_base = struct.unpack("=HQ",data)
++                        registers['gdtr'] = {"base": "0x%x"%gdtr_base,"limit": "0x%x"%gdtr_limit}
++                    if(str(group.Name) == "cpu" and str(tag.Name) == "IDTR"): 
++                        idtr_limit,idtr_base = struct.unpack("=HQ",data)
++                        registers['idtr'] = {"base": "0x%x"%idtr_base,"limit": "0x%x"%idtr_limit}
+                     if (self._config.DUMP_DIR and 
+                                 str(group.Name) == "MKSVMX" and 
+                                 str(tag.Name) == "imageData"):
+@@ -109,5 +196,29 @@ class VMwareInfo(crashinfo.CrashInfo):
+                         with open(full_path, "wb") as fh:
+                             fh.write(data)
+                             outfd.write("Wrote screenshot to: {0}\n".format(full_path))
++        for s,segment_name in zip(segments, ["es","cs","ss","ds","fs","gs","ldtr","tr"]):
++            registers[segment_name] = {"present": True ,"selector": s['sel'],"base": s['base64'], "limit" : s['lim'], 'attr' : s['rights']}
++        #just add the ones we don't care or have
++        registers["star"] = "0x001b000800000000"
++        registers["lstar"]="0xfffff68600002720"
++        registers["cstar"]="0x0000000000000000"
++        registers["sfmask"]="0x0000000000004700"
++        registers["fpcw"]="0x27f"
++        registers["fpsw"]="0x0"
++        registers["fptw"]= "0x0"    
++        registers["fpst"] = ["0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity",
++                "0x-Infinity"]
++        registers["mxcsr"] = "0x00001f80"
++        registers["mxcsr_mask"]="0xffbf"
++        registers["fpop"]="0x0"
++        registers["apic_base"] = "0x0"
++        import json
++        print(json.dumps(registers,indent=4))
+                     
+                     

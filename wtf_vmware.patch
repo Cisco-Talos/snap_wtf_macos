@@ -1,0 +1,166 @@
+From 2871a7c89d4d7c631f661b81b326b7c1f93de7e1 Mon Sep 17 00:00:00 2001
+From: aleks <alnikoli@cisco.com>
+Date: Tue, 12 Dec 2023 15:51:21 -0600
+Subject: [PATCH 1/2] add alternative raw memory loading to kdmp parser
+
+---
+ src/libs/kdmp-parser/src/lib/kdmp-parser.h | 53 +++++++++++++++-------
+ 1 file changed, 37 insertions(+), 16 deletions(-)
+
+diff --git a/src/libs/kdmp-parser/src/lib/kdmp-parser.h b/src/libs/kdmp-parser/src/lib/kdmp-parser.h
+index 20cb239..e0c44cc 100644
+--- a/src/libs/kdmp-parser/src/lib/kdmp-parser.h
++++ b/src/libs/kdmp-parser/src/lib/kdmp-parser.h
+@@ -70,25 +70,29 @@ public:
+     //
+
+     if (!ParseDmpHeader()) {
+-      printf("ParseDmpHeader failed.\n");
+-      return false;
+-    }
+-
+-    //
+-    // Retrieve the physical memory according to the type of dump we have.
+-    //
+-
+-    if (DmpHdr_->DumpType == DumpType_t::FullDump) {
+-      if (!BuildPhysmemFullDump()) {
+-        printf("BuildPhysmemFullDump failed.\n");
++      printf("ParseDmpHeader failed. Not a .dmp file? Trying to load as VMWare raw dump.\n");
++      //try to load it as a vmware snapshot
++      if(!BuildPhysmemRawDump()){
++        printf("BuildPhysmemRawDump failed. Not VMWare snapshot either?\n");
+         return false;
+       }
+-    } else if (DmpHdr_->DumpType == DumpType_t::BMPDump) {
+-      if (!BuildPhysmemBMPDump()) {
+-        printf("BuildPhysmemBMPDump failed.\n");
+-        return false;
++    }else{
++      //
++      // Retrieve the physical memory according to the type of dump we have.
++      //
++
++      if (DmpHdr_->DumpType == DumpType_t::FullDump) {
++        if (!BuildPhysmemFullDump()) {
++          printf("BuildPhysmemFullDump failed.\n");
++          return false;
++        }
++      } else if (DmpHdr_->DumpType == DumpType_t::BMPDump) {
++        if (!BuildPhysmemBMPDump()) {
++          printf("BuildPhysmemBMPDump failed.\n");
++          return false;
++        }
+       }
+-    }
++  }
+
+     return true;
+   }
+@@ -528,6 +532,23 @@ private:
+     return true;
+   }
+
++
++bool BuildPhysmemRawDump(){
++  //vmware snapshot is just a raw linear dump of physical memory, with some gaps
++  //just fill up a structure for all the pages with appropriate physmem file offsets
++  //assuming physmem dump file is from a vm with 4gb of ram
++  uint8_t *base = (uint8_t *)FileMap_.ViewBase();
++  for(uint64_t i  = 0;i < 786432; i++ ){ //that many pages, first 3gb
++    uint64_t offset = i*4096;
++    Physmem_.try_emplace(offset, (uint8_t *)base+offset);
++  }
++  //there's a gap in VMWare's memory dump from 3 to 4gb, last 1gb is mapped above 4gb
++  for(uint64_t i  = 0;i < 262144; i++ ){
++    uint64_t offset = (i+786432)*4096;
++  Physmem_.try_emplace(i*4096+4294967296, (uint8_t *)base+offset);
++  }
++  return true;
++}
+   //
+   // Parse the DMP_HEADER.
+   //
+--
+2.33.0.windows.1
+
+
+From 198cec9464676bb485d8cf4f58ca586c76aa370d Mon Sep 17 00:00:00 2001
+From: aleks <alnikoli@cisco.com>
+Date: Tue, 12 Dec 2023 15:52:46 -0600
+Subject: [PATCH 2/2] Added build flag to relax certain errors
+
+A debugger won't work for vmware dumps, so just warn in that case and
+continue on.
+
+Additionally, there's some sort of discrepancy with cpu state between
+dumps from hyper-v and from vmware. Ignoring these didn't result in
+anything horrible, so warn on it but continue.
+---
+ src/CMakeLists.txt                         | 5 +++++
+ src/build/build-release-vmware-support.bat | 2 ++
+ src/wtf/utils.cc                           | 5 +++++
+ src/wtf/wtf.cc                             | 5 +++++
+ 4 files changed, 17 insertions(+)
+ create mode 100644 src/build/build-release-vmware-support.bat
+
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 7c13cf3..d9ef5f9 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -16,6 +16,11 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/libs/CLI11/include)
+ include_directories(${CMAKE_CURRENT_LIST_DIR}/libs/fmt/include)
+ include_directories(${CMAKE_CURRENT_LIST_DIR}/libs/yas/include)
+
++option(ERROR_WARN "Relax error handling , for loading vmware snapshots" OFF)
++if (ERROR_WARN)
++  add_definitions(-DERROR_WARN)
++endif()
++
+ file(
+     GLOB_RECURSE
+     wtf_srcfiles
+diff --git a/src/build/build-release-vmware-support.bat b/src/build/build-release-vmware-support.bat
+new file mode 100644
+index 0000000..9b7728a
+--- /dev/null
++++ b/src/build/build-release-vmware-support.bat
+@@ -0,0 +1,2 @@
++cmake .. -GNinja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DERROR_WARN=ON
++cmake --build .
+diff --git a/src/wtf/utils.cc b/src/wtf/utils.cc
+index 25960db..c88f7d2 100644
+--- a/src/wtf/utils.cc
++++ b/src/wtf/utils.cc
+@@ -238,7 +238,12 @@ bool SanitizeCpuState(CpuState_t &CpuState) {
+     if (Seg->Reserved != ((Seg->Limit >> 16) & 0xF)) {
+       fmt::print("Segment with selector {:x} has invalid attributes.\n",
+                  Seg->Selector);
++      #if defined(ERROR_WARN)
++      fmt::print("Above error could be fatal, but continuing anyway.");
++      #else
+       return false;
++      #endif
++
+     }
+   }
+
+diff --git a/src/wtf/wtf.cc b/src/wtf/wtf.cc
+index 2ac1bc4..c863ae2 100644
+--- a/src/wtf/wtf.cc
++++ b/src/wtf/wtf.cc
+@@ -419,7 +419,12 @@ int main(int argc, const char *argv[]) {
+   //
+
+   if (!g_Dbg.Init(Opts.DumpPath, Opts.SymbolFilePath)) {
++    fmt::print("WARNING: Debugger init failed.\n");
++    #if defined(ERROR_WARN)
++    fmt::print("Above error could be fatal, but continuing anyway.");
++    #else
+     return EXIT_FAILURE;
++    #endif
+   }
+
+   //
+--
+2.33.0.windows.1
