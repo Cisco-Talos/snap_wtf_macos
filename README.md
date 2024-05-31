@@ -1,7 +1,7 @@
 # WTF Snapshot fuzzing of macOS targets
 
 Support tooling , patches and sample fuzzers. 
-For a detailed usage guide, see: https://blog.talosintelligence.com/macos-snapshot-fuzzing
+For a detailed usage guide, see: https://blog.talosintelligence.com/talos-releases-new-macos-fuzzer
 
 Contains: 
 - `dump_symbols.py` - an LLDB scripts to make a JSON symbol store to use for symbolicating traces
