@@ -30,7 +30,7 @@ def findSymbol(addr):
     else:
         try:
             found = addresses[addresses<=addr][-1]
-        except:
+        except IndexError:
             return None, None
     last_found = found
     last_addr = addr
